@@ -1,0 +1,55 @@
+Acknowledgements
+Portions of this Software may utilize the following copyrighted
+material, the use of which is hereby acknowledged.
+
+---------------------------------------------------------------------------------
+
+Boltz-1: Democratizing Biomolecular Interaction Modeling
+
+MIT License
+
+Copyright (c) 2024 Jeremy Wohlwend, Gabriele Corso, Saro Passaro
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---------------------------------------------------------------------------------
+
+This project makes use of several publicly available datasets for training 
+models. We would like to acknowledge the following sources:
+
+- The Protein Data Bank [1]
+- The AlphaFold Database [2,3]
+- The AFESM Metagenomic Atlas [4]
+- The Atlas MD dataset [5]
+
+
+[1] Protein Data Bank: the single global archive for 3D macromolecular structure 
+data. Nucleic Acids Res 47: D520-D528 doi: https://doi.org/10.1093/nar/gky949
+[2] Jumper, J et al. Highly accurate protein structure prediction with AlphaFold.
+Nature (2021).
+[3] Varadi, M et al. AlphaFold Protein Structure Database: massively expanding the
+structural coverage of protein-sequence space with high-accuracy models. Nucleic 
+Acids Research (2021). 
+[4] Yeo J, Han Y, Bordin N, Lau AM, Kandathil SM, Kim H, Karin EL, Mirdita M, 
+Jones DT, Orengo C, Steinegger M. Metagenomic-scale analysis of the predicted
+protein structure universe. bioRxiv, 2025.
+[5] Yann Vander Meersche, Gabriel Cretin, Aria Gheeraert, Jean-Christophe Gelly, 
+and Tatiana Galochkina. Atlas: protein flexibility description from atomistic molecular
+dynamics simulations. Nucleic acids research, 52(D1):D384–D392,
+2024.
