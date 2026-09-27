@@ -170,71 +170,81 @@ class SwiGLUFeedForward(nn.Module):
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
-class TopologyConditionedMoE(nn.Module): # NEW
-    """
-    Mixture-of-experts feed-forward layer. The router learns to specialize
-    experts by topology (ordered vs. disordered) purely from the hidden
-    representation, without any external topology label.
-    """
+# >>> MODIFICATION START: TopologyConditionedMoE
+class TopologyConditionedMoE(nn.Module):
+    """Sparse feed-forward experts selected by token and topology features."""
 
-    def __init__(self, dim, hidden_dim, num_experts=4, top_k=2, multiple_of=256):
+    def __init__(
+        self,
+        dim,
+        hidden_dim,
+        num_experts=4,
+        top_k=2,
+        multiple_of=256,
+        topology_dim=None,
+    ):
         super().__init__()
+        if num_experts < 1:
+            raise ValueError("num_experts must be positive")
+        if top_k < 1 or top_k > num_experts:
+            raise ValueError("top_k must be between 1 and num_experts")
+
         self.num_experts = num_experts
         self.top_k = top_k
-
-        self.router = nn.Linear(dim, num_experts, bias=False)
+        topology_dim = dim if topology_dim is None else topology_dim
+        self.topology_projection = nn.Linear(topology_dim, dim, bias=False)
+        self.router = nn.Linear(2 * dim, num_experts, bias=False)
         self.experts = nn.ModuleList([
             SwiGLUFeedForward(dim, hidden_dim, multiple_of=multiple_of)
             for _ in range(num_experts)
         ])
-
-        self.last_aux_loss = None  # populated on each forward(), read by the training loop
+        self.last_aux_loss = None
 
         self.reset_parameters()
 
     def reset_parameters(self):
         torch.nn.init.xavier_uniform_(self.router.weight)
+        torch.nn.init.xavier_uniform_(self.topology_projection.weight)
 
-    def forward(self, x):
-        B, N, C = x.shape
-        x_flat = x.reshape(-1, C)  # (B*N, C)
+    def forward(self, x, topology=None):
+        batch_size, seq_len, dim = x.shape
+        x_flat = x.reshape(-1, dim)
 
-        router_logits = self.router(x_flat)                    # (B*N, num_experts)
-        router_probs = F.softmax(router_logits, dim=-1)
+        if topology is None:
+            topology_flat = torch.zeros_like(x_flat)
+        else:
+            if topology.ndim == 2:
+                if topology.shape[0] != batch_size:
+                    raise ValueError("topology batch dimension must match x")
+                topology = topology.unsqueeze(1).expand(-1, seq_len, -1)
+            if topology.shape[:2] != (batch_size, seq_len):
+                raise ValueError("topology must have shape (batch, seq_len, features)")
+            topology_flat = self.topology_projection(topology.reshape(-1, topology.shape[-1]))
 
-        top_k_probs, top_k_idx = router_probs.topk(self.top_k, dim=-1)  # (B*N, top_k)
-        top_k_probs = top_k_probs / (top_k_probs.sum(dim=-1, keepdim=True) + 1e-9)
+        router_probs = F.softmax(self.router(torch.cat([x_flat, topology_flat], dim=-1)), dim=-1)
+        top_k_probs, top_k_idx = router_probs.topk(self.top_k, dim=-1)
+        top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True).clamp_min(1e-9)
 
         out_flat = torch.zeros_like(x_flat)
         for expert_id, expert in enumerate(self.experts):
-            # tokens where this expert appears in their top_k
-            mask = (top_k_idx == expert_id).any(dim=-1)  # (B*N,)
+            mask = (top_k_idx == expert_id).any(dim=-1)
             if not mask.any():
                 continue
-            expert_input = x_flat[mask]
-            expert_output = expert(expert_input)
-
-            # weight by this expert's routing probability for those tokens
-            slot = (top_k_idx[mask] == expert_id)                       # (n_sel, top_k)
-            weight = (top_k_probs[mask] * slot).sum(dim=-1, keepdim=True)  # (n_sel, 1)
-
+            expert_output = expert(x_flat[mask])
+            weight = (top_k_probs[mask] * (top_k_idx[mask] == expert_id)).sum(dim=-1, keepdim=True)
             out_flat[mask] += weight * expert_output
 
         self.last_aux_loss = self._load_balance_loss(router_probs, top_k_idx)
-
-        out = out_flat.reshape(B, N, C)
-        assert not torch.isnan(out).any(), "NaN detected in MoE output"
-        return out
+        return out_flat.reshape(batch_size, seq_len, dim)
 
     def _load_balance_loss(self, router_probs, top_k_idx):
-        # Switch-Transformer-style: encourage uniform expert usage.
-        # fraction of tokens routed to each expert (based on top-1 choice)
-        num_experts = self.num_experts
         top1_idx = top_k_idx[:, 0]
-        tokens_per_expert = F.one_hot(top1_idx, num_experts).float().mean(dim=0)  # (num_experts,)
-        # average router probability mass per expert
-        prob_per_expert = router_probs.mean(dim=0)  # (num_experts,)
-        return num_experts * (tokens_per_expert * prob_per_expert).sum()
+        tokens_per_expert = F.one_hot(top1_idx, self.num_experts).float().mean(dim=0)
+        prob_per_expert = router_probs.mean(dim=0)
+        return self.num_experts * (tokens_per_expert * prob_per_expert).sum()
+
+
+# <<< MODIFICATION END: TopologyConditionedMoE
 
 #################################################################################
 #                               Utility Layers                                  #
@@ -318,64 +328,51 @@ class EnergyEmbedder(nn.Module): # NEW
         e_emb = self.mlp(e_freq)
         return e_emb
 
-class GatedSparseAttention(SelfAttentionLayer): # NEW
-    """
-    Self-attention with a learned per-head gate and a sparsity mask that
-    suppresses long-range token pairs, to avoid attention-sink artifacts
-    on structurally disordered regions.
-    """
+# >>> MODIFICATION START: GatedSparseAttention
+class GatedSparseAttention(SelfAttentionLayer):
+    """Block-local self-attention with an input-conditioned output gate."""
 
-    def __init__(self, *args, sparsity_window=None, **kwargs):
+    def __init__(self, *args, block_size=64, sparsity_window=None, **kwargs):
         super().__init__(*args, **kwargs)
-        # sparsity_window: max sequence distance allowed to attend to;
-        # None disables sparsity (falls back to a pure gating mechanism)
+        if block_size <= 0:
+            raise ValueError("block_size must be positive")
+        self.block_size = block_size
         self.sparsity_window = sparsity_window
-        # learned scalar gate per head, sigmoid-bounded, init near 1
-        # so early training behaves close to standard dense attention
-        self.head_gate = nn.Parameter(torch.full((self.num_heads,), 4.0))
-
-    def _build_sparsity_mask(self, N, device, dtype):
-        if self.sparsity_window is None:
-            return None
-        idx = torch.arange(N, device=device)
-        dist = (idx[:, None] - idx[None, :]).abs()
-        allowed = dist <= self.sparsity_window
-        # additive mask: 0 where allowed, -inf where disallowed
-        mask = torch.zeros(N, N, device=device, dtype=dtype)
-        mask.masked_fill_(~allowed, float("-inf"))
-        return mask  # (N, N), broadcasts over (B, H, N, N)
+        self.feature_gate = nn.Linear(self.qkv.in_features, self.qkv.in_features)
 
     def forward(self, x, **kwargs):
-        B, N, C = x.shape
-        attn_mask = kwargs.get("attention_mask")
+        batch_size, seq_len, hidden_size = x.shape
         pos = kwargs.get("pos")
-
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
-        qkv = rearrange(qkv, "b n t h c -> t b h n c")
-        q, k, v = qkv.unbind(0)
+        qkv = self.qkv(x).reshape(
+            batch_size, seq_len, 3, self.num_heads, hidden_size // self.num_heads
+        )
+        q, k, v = rearrange(qkv, "b n t h d -> t b h n d").unbind(0)
 
         if self.pos_embedder and pos is not None:
             q, k = self.pos_embedder(q, k, pos)
         q, k = self.q_norm(q), self.k_norm(k)
 
-        sparsity_mask = self._build_sparsity_mask(N, x.device, q.dtype)
-        if attn_mask is not None:
-            attn_mask = attn_mask.to(dtype=q.dtype)
-            if sparsity_mask is not None:
-                attn_mask = attn_mask + sparsity_mask
-        else:
-            attn_mask = sparsity_mask
+        block_count = (seq_len + self.block_size - 1) // self.block_size
+        padded_len = block_count * self.block_size
+        pad_len = padded_len - seq_len
+        if pad_len:
+            q = F.pad(q, (0, 0, 0, pad_len))
+            k = F.pad(k, (0, 0, 0, pad_len))
+            v = F.pad(v, (0, 0, 0, pad_len))
 
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        block_shape = (batch_size * block_count, self.num_heads, self.block_size, -1)
+        q = q.reshape(*block_shape)
+        k = k.reshape(*block_shape)
+        v = v.reshape(*block_shape)
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = out.reshape(batch_size, self.num_heads, padded_len, -1)
+        out = out[:, :, :seq_len].transpose(1, 2).reshape(batch_size, seq_len, hidden_size)
 
-        # per-head gate, sigmoid so it's bounded (0,1), broadcast over (B,H,N,C)
-        gate = torch.sigmoid(self.head_gate).view(1, self.num_heads, 1, 1)
-        out = out * gate
+        gate = torch.sigmoid(self.feature_gate(x))
+        return self.proj_drop(self.proj(out * gate))
 
-        out = out.transpose(1, 2).reshape(B, N, C)
-        out = self.proj(out)
-        out = self.proj_drop(out)
-        return out
+
+# <<< MODIFICATION END: GatedSparseAttention
 
 class ConditionEmbedder(nn.Module):
     """
