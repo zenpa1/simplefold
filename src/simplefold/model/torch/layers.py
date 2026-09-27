@@ -14,6 +14,36 @@ def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
+# >>> MODIFICATION START: AdaLNEnergy
+class AdaLNEnergy(nn.Module):
+    """Layer normalization conditioned on noise/time and optional energy."""
+
+    def __init__(self, hidden_size, cond_dim):
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.condition = nn.Linear(cond_dim, hidden_size)
+        self.energy = nn.Linear(1, hidden_size)
+        self.modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 2 * hidden_size),
+        )
+        nn.init.zeros_(self.modulation[-1].weight)
+        nn.init.zeros_(self.modulation[-1].bias)
+
+    def forward(self, x, cond, free_energy=None):
+        conditioning = self.condition(cond)
+        if free_energy is not None:
+            if free_energy.ndim == 1:
+                free_energy = free_energy.unsqueeze(-1)
+            conditioning = conditioning + self.energy(free_energy)
+
+        shift, scale = self.modulation(conditioning).chunk(2, dim=-1)
+        return modulate(self.norm(x), shift, scale)
+
+
+# <<< MODIFICATION END: AdaLNEnergy
+
+
 #################################################################################
 #                            Attention Layers                                  #
 #################################################################################
