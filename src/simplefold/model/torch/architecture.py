@@ -8,8 +8,36 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from model.torch.layers import FinalLayer, ConditionEmbedder
+# >>> MODIFICATION START: SparseUpcycling
+from model.torch.layers import FinalLayer, ConditionEmbedder, TopologyConditionedMoE
+# <<< MODIFICATION END: SparseUpcycling
 from utils.esm_utils import esm_model_dict
+
+
+# >>> MODIFICATION START: SparseUpcycling
+def sparse_upcycle_weights(base_model, sparse_model):
+    """Copy dense FFN weights into every compatible sparse MoE expert."""
+    copied_experts = 0
+    base_modules = dict(base_model.named_modules())
+    for module_name, sparse_module in sparse_model.named_modules():
+        if not isinstance(sparse_module, TopologyConditionedMoE):
+            continue
+        dense_module = base_modules.get(module_name)
+        if dense_module is None or not hasattr(dense_module, "mlp"):
+            continue
+        dense_state = dense_module.mlp.state_dict()
+        for expert in sparse_module.experts:
+            expert_state = expert.state_dict()
+            if set(dense_state) != set(expert_state):
+                raise ValueError(f"Incompatible FFN state at {module_name}")
+            if any(dense_state[key].shape != expert_state[key].shape for key in dense_state):
+                raise ValueError(f"FFN shape mismatch at {module_name}")
+            expert.load_state_dict(dense_state)
+            copied_experts += 1
+    return copied_experts
+
+
+# <<< MODIFICATION END: SparseUpcycling
 
 
 class FoldingDiT(nn.Module):
@@ -287,6 +315,10 @@ class FoldingDiT(nn.Module):
             c=c_emb, 
             attention_mask=None,
             pos=token_pe_pos,
+            # >>> MODIFICATION START: SparseUpcycling
+            energy=energy if self.use_energy_condition else None,
+            topology=feats.get("topology_condition", feats.get("topology")),
+            # <<< MODIFICATION END: SparseUpcycling
         )
 
         # ungrouping: broadcast residue tokens to atom tokens

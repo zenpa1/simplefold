@@ -6,9 +6,17 @@
 import torch
 from torch import nn
 from timm.models.vision_transformer import Mlp
-from model.torch.layers import modulate, SwiGLUFeedForward
+# >>> MODIFICATION START: SimpleFoldBlock
+from model.torch.layers import (
+    AdaLNEnergy,
+    TopologyConditionedMoE,
+    modulate,
+    SwiGLUFeedForward,
+)
+# <<< MODIFICATION END: SimpleFoldBlock
 
 
+# >>> MODIFICATION START: SimpleFoldBlock
 class DiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
@@ -20,15 +28,16 @@ class DiTBlock(nn.Module):
         hidden_size,
         mlp_ratio=4.0,
         use_swiglu=True,
-        feed_forward_layer=None, # NEW
+        feed_forward_layer=None,
+        energy_cond_dim=None,
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = self_attention_layer()
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        if feed_forward_layer is not None:          # NEW
-            self.mlp = feed_forward_layer()          # NEW
+        if feed_forward_layer is not None:
+            self.mlp = feed_forward_layer()
         elif use_swiglu:
             self.mlp = SwiGLUFeedForward(hidden_size, mlp_hidden_dim)
         else:
@@ -41,6 +50,11 @@ class DiTBlock(nn.Module):
             )
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        )
+        self.adaLN_energy = (
+            AdaLNEnergy(hidden_size, energy_cond_dim)
+            if energy_cond_dim is not None
+            else None
         )
         self.initialize_weights()
 
@@ -57,6 +71,9 @@ class DiTBlock(nn.Module):
         # Zero-out adaLN modulation layers in DiT encoder blocks:
         nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
+        if self.adaLN_energy is not None:
+            nn.init.zeros_(self.adaLN_energy.modulation[-1].weight)
+            nn.init.zeros_(self.adaLN_energy.modulation[-1].bias)
 
     def forward(
         self,
@@ -64,6 +81,18 @@ class DiTBlock(nn.Module):
         c,
         **kwargs,
     ):
+        if self.adaLN_energy is not None:
+            energy = kwargs.pop("energy", None)
+            topology = kwargs.pop("topology", None)
+            attn_input = self.adaLN_energy(latents, c, free_energy=energy)
+            latents = latents + self.attn(attn_input, **kwargs)
+            mlp_input = self.adaLN_energy(latents, c, free_energy=energy)
+            if isinstance(self.mlp, TopologyConditionedMoE):
+                mlp_output = self.mlp(mlp_input, topology=topology)
+            else:
+                mlp_output = self.mlp(mlp_input)
+            return latents + mlp_output
+
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.adaLN_modulation(c).chunk(6, dim=1)
         )
@@ -126,3 +155,6 @@ class HomogenTrunk(nn.Module):
             kwargs["layer_idx"] = i
             latents = block(latents=latents, c=c, **kwargs)
         return latents
+
+
+    # <<< MODIFICATION END: SimpleFoldBlock
