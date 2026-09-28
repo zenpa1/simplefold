@@ -65,6 +65,10 @@ class FoldingDiT(nn.Module):
         use_length_condition=True,
         use_energy_condition=False,   # NEW
         energy_embedder=None,          # NEW
+        energy_cond_dim=None,     # config variable, consumed via ${...} interpolation
+        gsa_block_size=None,      # ditto
+        moe_num_experts=None,     # ditto
+        moe_top_k=None,           # ditto
     ):
         super().__init__()
         self.pos_embedder = pos_embedder
