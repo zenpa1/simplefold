@@ -22,10 +22,12 @@ def sparse_upcycle_weights(base_model, sparse_model):
     for module_name, sparse_module in sparse_model.named_modules():
         if not isinstance(sparse_module, TopologyConditionedMoE):
             continue
+        # named_modules() yields the MoE itself (e.g. "block.mlp"), so the
+        # module at the same name in the dense model IS the dense FFN.
         dense_module = base_modules.get(module_name)
-        if dense_module is None or not hasattr(dense_module, "mlp"):
+        if dense_module is None or isinstance(dense_module, TopologyConditionedMoE):
             continue
-        dense_state = dense_module.mlp.state_dict()
+        dense_state = dense_module.state_dict()
         for expert in sparse_module.experts:
             expert_state = expert.state_dict()
             if set(dense_state) != set(expert_state):
